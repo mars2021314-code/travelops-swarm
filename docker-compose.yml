@@ -1,0 +1,128 @@
+services:
+  qdrant:
+    image: qdrant/qdrant
+    restart: unless-stopped
+    ports:
+      - "6335:6333"
+    volumes:
+      - ./customer_support_chat/data/qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__ENABLE_STATIC_CONTENT=true
+      - QDRANT__LOG_LEVEL=INFO
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=customer_support
+      - POSTGRES_USER=customer_support
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-customer_support}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U customer_support -d customer_support"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  travelops-swarm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - QDRANT_URL=http://qdrant:6333
+      - REQUIRE_QDRANT_SERVER=true
+      - DATABASE_URL=postgresql://customer_support:${POSTGRES_PASSWORD:-customer_support}@postgres:5432/customer_support
+      - CHECKPOINT_DATABASE_URL=postgresql://customer_support:${POSTGRES_PASSWORD:-customer_support}@postgres:5432/customer_support
+      - REQUIRE_PERSISTENT_CHECKPOINT=true
+      - REDIS_URL=redis://redis:6379
+      - CHAT_CONCURRENCY_LIMIT=20
+      - CHAT_REQUEST_TIMEOUT_SECONDS=180
+      - CHAT_RATE_LIMIT_PER_MINUTE=60
+      - LLM_TIMEOUT_SECONDS=60
+      - LLM_MAX_RETRIES=2
+      - MEMORY_AUDIT_LOG_ENABLED=false
+      - PYTHONUNBUFFERED=1
+      - UVLOOP=1
+    networks:
+      - app-network
+    depends_on:
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - travelops-swarm
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.2'
+
+volumes:
+  redis_data:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
